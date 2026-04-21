@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>AR Trace</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+  body {
+    background: #111;
+    font-family: -apple-system, sans-serif;
+    height: 100dvh;
+    overflow: hidden;
+    color: #fff;
+  }
+
+  /* ── Full-screen camera ── */
+  #video {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  /* ── Reference image sits on top of camera ── */
+  #ref-img {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    opacity: 0.5;
+    display: none;
+    pointer-events: none;
+    touch-action: none;
+    transform-origin: center center;
+  }
+
+  /* ── Bottom control bar ── */
+  #bar {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    padding: 14px 16px 28px;
+    background: linear-gradient(to top, rgba(0,0,0,0.85), transparent);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    z-index: 100;
+  }
+
+  .big-btn {
+    flex: 1;
+    padding: 14px 8px;
+    border: none;
+    border-radius: 14px;
+    font-size: 15px;
+    font-weight: 700;
+    font-family: inherit;
+    cursor: pointer;
+    color: #fff;
+    transition: opacity 0.15s;
+  }
+  .big-btn:active { opacity: 0.6; }
+
+  #photo-btn  { background: #0a84ff; }
+  #camera-btn { background: #1c1c2e; border: 1.5px solid rgba(255,255,255,0.15); }
+
+  /* Opacity slider row */
+  #slider-row {
+    position: fixed;
+    bottom: 110px; left: 0; right: 0;
+    padding: 0 20px;
+    display: none;
+    align-items: center;
+    gap: 12px;
+    z-index: 100;
+  }
+  #slider-row label { font-size: 13px; opacity: 0.6; white-space: nowrap; }
+  #opacity-slider {
+    flex: 1;
+    accent-color: #0a84ff;
+    height: 4px;
+  }
+
+  #file-input { display: none; }
+
+  /* Permission error */
+  #cam-error {
+    position: fixed;
+    top: 20px; left: 50%; transform: translateX(-50%);
+    background: #ff2d55;
+    color: #fff;
+    padding: 10px 18px;
+    border-radius: 12px;
+    font-size: 13px;
+    font-weight: 600;
+    display: none;
+    z-index: 200;
+    text-align: center;
+    max-width: 90vw;
+  }
+
+  /* Upload prompt overlay */
+  #prompt {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    pointer-events: none;
+    z-index: 50;
+  }
+  #prompt-inner {
+    text-align: center;
+    opacity: 0.35;
+  }
+  #prompt-inner div { font-size: 52px; margin-bottom: 10px; }
+  #prompt-inner p { font-size: 14px; letter-spacing: 1px; }
+</style>
+</head>
+<body>
+
+<!-- Camera feed -->
+<video id="video" autoplay playsinline muted></video>
+
+<!-- Reference photo overlay -->
+<img id="ref-img" alt="reference">
+
+<!-- Hint when nothing loaded -->
+<div id="prompt">
+  <div id="prompt-inner">
+    <div>📷</div>
+    <p>TAP "ADD PHOTO" TO START</p>
+  </div>
+</div>
+
+<!-- Opacity slider (shows after photo loaded) -->
+<div id="slider-row">
+  <label>Opacity</label>
+  <input type="range" id="opacity-slider" min="10" max="100" value="50"
+    oninput="setOpacity(this.value)">
+</div>
+
+<!-- Bottom bar -->
+<div id="bar">
+  <button class="big-btn" id="photo-btn"
+    onclick="document.getElementById('file-input').click()">
+    🖼️ Add Photo
+  </button>
+  <button class="big-btn" id="camera-btn" onclick="toggleCamera()">
+    📷 Start Camera
+  </button>
+</div>
+
+<input type="file" id="file-input" accept="image/*" onchange="loadPhoto(event)">
+
+<!-- Camera error -->
+<div id="cam-error" id="cam-error"></div>
+
+<script>
+  const video   = document.getElementById('video');
+  const refImg  = document.getElementById('ref-img');
+  const prompt  = document.getElementById('prompt');
+  const sliderRow = document.getElementById('slider-row');
+  const camBtn  = document.getElementById('camera-btn');
+  const camError = document.getElementById('cam-error');
+
+  let stream = null;
+  let cameraOn = false;
+
+  // ── Load photo from gallery ────────────────────────────────────
+  function loadPhoto(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    refImg.src = url;
+    refImg.style.display = 'block';
+    prompt.style.display = 'none';
+    sliderRow.style.display = 'flex';
+    // reset file input so same file can be re-selected
+    e.target.value = '';
+  }
+
+  // ── Opacity ───────────────────────────────────────────────────
+  function setOpacity(val) {
+    refImg.style.opacity = val / 100;
+  }
+
+  // ── Camera ───────────────────────────────────────────────────
+  async function toggleCamera() {
+    if (cameraOn) {
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+      video.srcObject = null;
+      cameraOn = false;
+      camBtn.textContent = '📷 Start Camera';
+      return;
+    }
+
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }
+      });
+    } catch {
+      try {
+        // fallback: any camera
+        stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      } catch (err) {
+        showError('Camera blocked. Open this page via https:// in Safari or Chrome.');
+        return;
+      }
+    }
+
+    video.srcObject = stream;
+    await video.play();
+    cameraOn = true;
+    camBtn.textContent = '⏹ Stop Camera';
+  }
+
+  function showError(msg) {
+    camError.textContent = msg;
+    camError.style.display = 'block';
+    setTimeout(() => camError.style.display = 'none', 5000);
+  }
+
+  // ── Pinch to scale + drag the overlay image ───────────────────
+  let touches = {};
+  let initDist = 0;
+  let initScale = 1;
+  let currScale = 1;
+
+  // translate
+  let tx = 0, ty = 0;
+  let dragStartX = 0, dragStartY = 0;
+  let initTx = 0, initTy = 0;
+  let dragging = false;
+
+  function applyTransform() {
+    refImg.style.transform = `translate(${tx}px, ${ty}px) scale(${currScale})`;
+  }
+
+  refImg.style.pointerEvents = 'none'; // drawing happens on camera; no need to intercept
+
+  // Allow dragging via a transparent overlay
+  const dragLayer = document.createElement('div');
+  dragLayer.style.cssText = 'position:fixed;inset:0;z-index:60;touch-action:none;';
+  document.body.appendChild(dragLayer);
+
+  // Single touch = drag image
+  dragLayer.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) {
+      dragging = true;
+      dragStartX = e.touches[0].clientX;
+      dragStartY = e.touches[0].clientY;
+      initTx = tx; initTy = ty;
+    }
+    if (e.touches.length === 2) {
+      dragging = false;
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      initDist = Math.hypot(dx, dy);
+      initScale = currScale;
+    }
+  }, { passive: true });
+
+  dragLayer.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if (e.touches.length === 1 && dragging) {
+      tx = initTx + (e.touches[0].clientX - dragStartX);
+      ty = initTy + (e.touches[0].clientY - dragStartY);
+      applyTransform();
+    }
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const dist = Math.hypot(dx, dy);
+      currScale = Math.min(4, Math.max(0.2, initScale * dist / initDist));
+      applyTransform();
+    }
+  }, { passive: false });
+
+  dragLayer.addEventListener('touchend', () => { dragging = false; });
+
+  // Mouse drag for desktop testing
+  dragLayer.addEventListener('mousedown', e => {
+    dragging = true;
+    dragStartX = e.clientX; dragStartY = e.clientY;
+    initTx = tx; initTy = ty;
+  });
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    tx = initTx + (e.clientX - dragStartX);
+    ty = initTy + (e.clientY - dragStartY);
+    applyTransform();
+  });
+  document.addEventListener('mouseup', () => dragging = false);
+</script>
+</body>
+</html>
